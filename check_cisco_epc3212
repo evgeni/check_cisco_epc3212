@@ -1,0 +1,106 @@
+#!/usr/bin/perl
+
+# Copyright (c) 2014, Evgeni Golov
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without modification,
+# are permitted provided that the following conditions are met:
+#
+# * Redistributions of source code must retain the above copyright notice, this
+#   list of conditions and the following disclaimer.
+#
+# * Redistributions in binary form must reproduce the above copyright notice, this
+#   list of conditions and the following disclaimer in the documentation and/or
+#   other materials provided with the distribution.
+#
+# * Neither the name of the {organization} nor the names of its
+#   contributors may be used to endorse or promote products derived from
+#   this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+# ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+# ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+use strict;
+use warnings;
+use Nagios::Plugin;
+use LWP::UserAgent;
+use HTML::TableExtract;
+
+my $np = Nagios::Plugin->new(
+    usage => "Usage: %s [ -H|--hostname=<hostname>] ",
+    shortname => 'Check Cisco EPC3212',
+    url       => 'https://github.com/evgeni/check_cisco_epc3212',
+    version   => '0.1',
+    license   => 'This plugin is free software, and comes with ABSOLUTELY
+NO WARRANTY. It may be used, redistributed and/or modified under
+the terms of the BSD 3-clause license.',
+);
+
+$np->add_arg(
+    spec => 'hostname|H=s',
+    help => 'IP/hostname of the Cisco EPC3212 (default: %s)',
+    default => '192.168.100.1',
+);
+
+$np->getopts;
+
+my $url = 'http://'. $np->opts->hostname .'/Docsis_system.asp';
+
+my $ua = new LWP::UserAgent;
+$ua->timeout( $np->opts->timeout );
+my $response = $ua->get($url);
+
+my $status = "could not parse status from HTML";
+
+if ( !$response->is_success ) {
+    $np->nagios_exit( 'UNKNOWN', "Could not load $url" );
+}
+else {
+    my $te = HTML::TableExtract->new( attribs => { class => 'std' } );
+    $te->parse($response->decoded_content);
+    foreach my $ts ($te->tables) {
+        foreach my $row ($ts->rows) {
+            if (@$row[0] =~ /vs_channel.* (\d+)dw/) {
+                my $channel = $1;
+                @$row[1] =~ /([\d.-]+)/;
+                my $pwr = $1;
+                @$row[2] =~ /([\d.-]+)/;
+                my $snr = $1;
+                $np->add_perfdata(
+                    label    => 'channel_' . $channel . '-pwr',
+                    value    => $pwr,
+                    uom      => "dBmV",
+                );
+                $np->add_perfdata(
+                    label    => 'channel_' . $channel . '-snr',
+                    value    => $snr,
+                    uom      => "dB",
+                );
+            }
+            elsif (@$row[0] =~ /vcmstatus/) {
+                @$row[1] =~ /vcm_(\w+)/;
+                $status = $1;
+            }
+        }
+    }
+    if ($status ne 'operational') {
+        $np->add_message( CRITICAL, "Modem Status: $status" );
+    }
+    else {
+        $np->add_message( OK, "Modem Status: OK" );
+    }
+}
+
+my $code;
+my $message;
+( $code, $message ) = $np->check_messages;
+
+$np->nagios_exit( $code, $message );
